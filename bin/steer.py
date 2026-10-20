@@ -2,18 +2,20 @@
 """kanban-stream companion: /steer daemon.
 
 Long-polls the Telegram Bot API for ``/steer <task-id> <instruction>``
-messages from allowlisted users and posts them into the task's kanban
-comment thread as ``[steer] ...`` comments. The kanban-stream *plugin*
-polls those comments on the read side, so steering closes the loop
-without any API coupling between the two.
+messages from allowlisted users and posts them as ``[steer] ...``
+comments on the task through the public ``hermes kanban comment`` CLI.
+Hermes core delivers new task comments to the running worker, so
+steering closes the loop without any API coupling between the two.
 
 Security model (same as the production daemon):
   - allowlist is checked BEFORE any parsing; non-allowlisted senders
     are dropped silently (no response, no log of content)
   - update offset is persisted so a restart does not re-process
     (and a bot token rotation does not replay) old updates
-  - the daemon opens the kanban DB with a short lock timeout; it never
-    holds a write for long
+  - the daemon never writes the kanban DB directly — comments go
+    through the public CLI (core's locking, task check, and
+    ``commented`` event apply); its only DB access is a read-only
+    task-status lookup
 
 Credentials come from the environment (never from files, never
 hardcoded):
@@ -43,6 +45,7 @@ import json
 import os
 import signal
 import sqlite3
+import subprocess
 import sys
 import time
 import traceback
@@ -127,7 +130,8 @@ def send_text(token: str, chat_id, text: str):
 # ---------------------------------------------------------------------------
 
 def offset_file() -> str:
-    return os.path.join(hermes_home(), "kanban-stream-steer-offset")
+    return os.path.join(hermes_home(), "plugin-data", "kanban-stream",
+                        "steer-offset")
 
 
 def read_offset() -> int:
@@ -140,6 +144,7 @@ def read_offset() -> int:
 
 def write_offset(offset: int) -> None:
     try:
+        os.makedirs(os.path.dirname(offset_file()), exist_ok=True)
         with open(offset_file(), "w") as f:
             f.write(str(offset))
     except Exception as e:
@@ -173,25 +178,25 @@ def get_task_status(task_id: str):
 
 
 def write_steer_comment(task_id: str, instruction: str) -> bool:
-    """Post a [steer] comment directly into the kanban DB.
+    """Post a [steer] comment through the public Hermes CLI:
 
-    Deliberately does NOT import hermes_cli: the daemon must stay
-    standalone (the fork may not be installed under a catalog install),
-    and the comment table schema (id, task_id, author, body, created_at)
-    is stable.
+        hermes kanban comment <task_id> --author <label> "[steer] ..."
+
+    Going through the CLI means core's locking, task validation, and
+    the ``commented`` event all apply — the daemon never writes
+    kanban.db with raw SQL. (Its remaining DB use, the task-status
+    check in get_task_status, is read-only.)
     """
     author = (os.environ.get(STEER_AUTHOR_VAR) or "operator").strip()
     try:
-        conn = open_db()
-        try:
-            conn.execute(
-                "INSERT INTO task_comments (task_id, author, body, created_at)"
-                " VALUES (?, ?, ?, ?)",
-                (task_id, author, "[steer] " + instruction,
-                 int(time.time())))
-            conn.commit()
-        finally:
-            conn.close()
+        r = subprocess.run(
+            ["hermes", "kanban", "comment", task_id,
+             "--author", author, "[steer] " + instruction],
+            capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            log("steer comment failed: %s"
+                % (r.stderr.strip() or r.stdout.strip() or r.returncode))
+            return False
         return True
     except Exception as e:
         log("steer comment write failed: %s" % e)
