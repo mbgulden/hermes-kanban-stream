@@ -38,12 +38,15 @@ The message stays pinned so the final state survives the scroll.
   thinking indicator ≤1 / 30 s) instead of flooding the chat.
 - Shows per-request completion tokens from `post_api_request` usage as
   tok/s over the task's lifetime.
-- **Steering (Phase 2):** polls the task's kanban comment thread for
-  `[steer] …` comments (≤1 poll / 6 s) and injects them into the next
-  LLM turn as an operator instruction. Works even for `[no-stream]`
-  tasks — input without output.
+- **Steering (Phase 2):** a `[steer] …` comment on the task is
+  delivered to the running worker by Hermes core itself (core hands
+  every new non-self task comment to the worker), and the plugin
+  mirrors a "✉️ Steer received" line into the stream when one lands
+  (watch polls the comment thread ≤1 / 6 s, display only — the plugin
+  never injects steer text). Post steers from the board, or from
+  Telegram through the companion daemon.
 - `[no-stream]` opt-out: add the marker to a task's body to suppress
-  streaming (steering still works).
+  streaming (steering still works — core delivers it).
 
 **Doesn't**
 
@@ -72,7 +75,7 @@ The message stays pinned so the final state survives the scroll.
                                                                                                        │
                  ┌──────────────────────────────┐    ▲                                                  │
                  │ companion daemon bin/steer.py │───┘ (allowlisted /steer from Telegram →              │
-                 │ long-poll getUpdates         │    [steer] comment into kanban.db)                    │
+                 │ long-poll getUpdates         │    [steer] comment via hermes CLI)                    │
                  └──────────────────────────────┘                                                        │
 ```
 
@@ -87,10 +90,11 @@ The message stays pinned so the final state survives the scroll.
   can never stall, crash, or alter a kanban worker.
 - **Steering round-trip is comment-based.** The write side (companion
   daemon, or any human/agent with board access) posts a comment
-  `[steer] <instruction>`; the read side (this plugin) polls
-  `task_comments` on a 6 s watermark and returns
-  `{"context": "…"}` from `pre_llm_call`, so the next turn sees it.
-  No private APIs, no fork-only surface — plain kanban DB + public hooks.
+  `[steer] <instruction>` — the daemon via the public
+  `hermes kanban comment` CLI, never raw SQL — and Hermes core
+  delivers the comment to the running worker. The plugin's read side
+  only watches the thread to show "✉️ Steer received" in the stream.
+  No private APIs, no fork-only surface — public CLI + public hooks.
 - **Per-task state** lives in a module-level dict, cleaned up 60 s after
   the final edit. Multiple workers in one gateway process stream
   independently (keyed by `HERMES_KANBAN_TASK`).
@@ -278,7 +282,7 @@ fail-opens and the next edit retries.
   names, *first 80 chars* of a tool argument (command/path/JSON
   summary), elapsed/tok stats, and the final summary text (first 200
   chars). **Steer instructions flow both ways** (Telegram → task
-  comment → LLM context). If your tool arguments contain secrets,
+  comment → worker, delivered by core). If your tool arguments contain secrets,
   remember the summary line goes to the ops chat.
 - **Reads:** the kanban SQLite DB (read-only: task title/body,
   comments, task status) and the profile secret scope for the three
@@ -287,7 +291,7 @@ fail-opens and the next edit retries.
   phones home except to your bot.
 - **The companion daemon** long-polls `getUpdates` with the same token
   (25 s timeout) and stores one integer (the update offset) at
-  `$HERMES_HOME/kanban-stream-steer-offset`.
+  `$HERMES_HOME/plugin-data/kanban-stream/steer-offset`.
 
 ## License
 
