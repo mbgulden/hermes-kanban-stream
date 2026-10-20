@@ -1,4 +1,4 @@
-"""Kanban Stream Plugin for Hermes Agent — v1.0.0 (public release).
+"""Kanban Stream Plugin for Hermes Agent — v1.0.1 (public release).
 
 Streams kanban worker activity (tool calls, thinking phases) to a
 Telegram ops channel. One message per task, edited in place. Final
@@ -274,7 +274,8 @@ class _TaskStream:
         text = "\n".join(lines)
         return text[:4000]  # stay under Telegram's 4096 limit
 
-    def _do_send_initial(self):
+    def _do_send_initial(self, final: bool = False, blocked: bool = False,
+                         summary: str = ""):
         chat = _chat_id()
         if not chat:
             return
@@ -282,7 +283,7 @@ class _TaskStream:
             if self._send_in_flight or self.message_id is not None:
                 return  # already sending or sent
             self._send_in_flight = True
-        text = self._format()
+        text = self._format(final=final, blocked=blocked, summary=summary)
         def _on_result(result):
             try:
                 mid = result.get("result", {}).get("message_id")
@@ -306,16 +307,28 @@ class _TaskStream:
         text = self._format(final=final, blocked=blocked, summary=summary)
         if mid:
             def _on_result(result):
-                # If edit failed (message gone), post fresh
+                # If the message is gone (deleted / too old to edit),
+                # forget its id and post a fresh one carrying the same
+                # state. Other failures (flood control, "message is not
+                # modified") must NOT trigger a repost — that would
+                # duplicate the stream message.
                 if not result.get("ok"):
-                    self._do_send_initial()
+                    desc = str(result.get("description", "")).lower()
+                    if ("message to edit not found" in desc
+                            or "message can't be edited" in desc
+                            or "message_id_invalid" in desc):
+                        with self._lock:
+                            self.message_id = None
+                        self._do_send_initial(final=final, blocked=blocked,
+                                              summary=summary)
             with self._lock:
                 self.edit_count += 1
             _tg_async("editMessageText",
                       {"chat_id": chat, "message_id": mid, "text": text},
                       on_result=_on_result)
         else:
-            self._do_send_initial()
+            self._do_send_initial(final=final, blocked=blocked,
+                                  summary=summary)
 
     def _do_pin(self):
         """Pin the final message. Fail-open; bots can pin their own 1:1 messages."""
@@ -431,10 +444,13 @@ def _is_error_result(result: Any) -> bool:
         return False
     try:
         if isinstance(result, dict):
+            # Key-based signals only: a substring scan over a dict result
+            # false-positives on tool output that merely mentions errors
+            # (a file read, a log tail, a search hit).
             if result.get("error") or result.get("success") is False:
                 return True
-            s = str(result).lower()
-            return "error" in s and "no error" not in s
+            status = str(result.get("status", "")).lower()
+            return status in ("error", "failed", "failure")
         s = str(result).lower()
         return ("error" in s or "failed" in s or "traceback" in s) and len(s) < 500
     except Exception:
@@ -477,8 +493,8 @@ def on_post_tool_call(tool_name: str, result: Any = None,
 
 
 # --- Phase 2: plugin-side steering via comment polling ---
-_steer_watermark = {}  # {task_id: last_seen_comment_id}
-_steer_last_poll = {}  # {task_id: monotonic time}
+_steer_watermark: Dict[str, int] = {}    # {task_id: last_seen_comment_id}
+_steer_last_poll: Dict[str, float] = {}  # {task_id: monotonic time}
 _STEER_POLL_SECONDS = 6.0
 
 
