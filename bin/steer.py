@@ -184,7 +184,7 @@ def write_steer_comment(task_id: str, instruction: str) -> bool:
     try:
         conn = open_db()
         try:
-            cur = conn.execute(
+            conn.execute(
                 "INSERT INTO task_comments (task_id, author, body, created_at)"
                 " VALUES (?, ?, ?, ?)",
                 (task_id, author, "[steer] " + instruction,
