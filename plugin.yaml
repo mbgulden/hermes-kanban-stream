@@ -1,5 +1,5 @@
 name: kanban-stream
-version: "1.0.1"
+version: "1.0.2"
 description: >-
   Stream live kanban worker activity to a Telegram ops channel — one
   edit-in-place message per task with rolling tool history, elapsed timer,
