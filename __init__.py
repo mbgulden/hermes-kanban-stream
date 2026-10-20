@@ -1,4 +1,4 @@
-"""Kanban Stream Plugin for Hermes Agent — v1.0.1 (public release).
+"""Kanban Stream Plugin for Hermes Agent — v1.0.2 (public release).
 
 Streams kanban worker activity (tool calls, thinking phases) to a
 Telegram ops channel. One message per task, edited in place. Final
@@ -7,10 +7,12 @@ messages are pinned.
 Phase 1a: skeleton + hooks (done). Phase 1b: Telegram forwarding (done).
 Phase 1c: formatting hardening — rolling window, elapsed timer,
 edit counting, final-state pin, tokens/sec from post_api_request usage.
-Phase 2: steering via kanban task comments (read-side: the plugin polls
-[steer] comments and injects them into the next LLM turn; write-side:
-the optional bin/steer.py companion daemon posts /steer commands as
-[steer] comments from Telegram).
+Phase 2: steering via kanban task comments (write-side: the optional
+bin/steer.py companion daemon posts /steer commands as [steer] comments
+from Telegram through the public `hermes kanban comment` CLI; delivery
+to the running worker is core's job — core hands every new non-self
+task comment to the worker. Read-side, the plugin only watches for
+[steer] comments to mirror a "Steer received" line into the stream).
 
 Credentials are resolved through Hermes' secret scope
 (agent.secret_scope.get_secret) per catalog Rule 11 — no .env files or
@@ -83,15 +85,15 @@ def _kanban_db_path() -> str:
 def _secret(name: str) -> str:
     """Resolve a credential through the active profile's secret scope.
 
-    Falls back to os.environ (fail-open) when the secret-scope machinery
-    is unavailable (older Hermes / non-gateway runs) or refuses.
+    agent.secret_scope.get_secret always exists at the supported Hermes
+    floor, so there is deliberately no os.environ fallback: a scope
+    error must surface (it is what stops cross-profile reads), never be
+    swallowed into a silent env read. Call this only on a hook's own
+    thread — a daemon thread does not carry the profile's secret scope.
     """
-    try:
-        from agent import secret_scope
-        val = secret_scope.get_secret(name, "") or ""
-        return val.strip()
-    except Exception:
-        return (os.environ.get(name) or "").strip()
+    from agent import secret_scope
+    val = secret_scope.get_secret(name, "") or ""
+    return val.strip()
 
 
 def _bot_token() -> str:
@@ -116,12 +118,13 @@ def _task_id() -> str:
     return os.environ.get("HERMES_KANBAN_TASK", "")
 
 
+# Public surface only: register() stores ctx.profile_name here; the
+# plugin never imports the private hermes_cli.profiles module.
+_profile_name = "hermes"
+
+
 def _profile() -> str:
-    try:
-        from hermes_cli.profiles import get_active_profile_name
-        return get_active_profile_name() or "hermes"
-    except Exception:
-        return "hermes"
+    return _profile_name
 
 
 # ---------------------------------------------------------------------------
@@ -158,9 +161,14 @@ def _task_meta(task_id: str) -> Dict[str, Any]:
 # Telegram client (fire-and-forget, fail-open)
 # ---------------------------------------------------------------------------
 
-def _tg_request(method: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Synchronous Telegram Bot API call. Returns parsed JSON or None."""
-    token = _bot_token()
+def _tg_request(method: str, params: Dict[str, Any],
+                token: str) -> Optional[Dict[str, Any]]:
+    """Synchronous Telegram Bot API call. Returns parsed JSON or None.
+
+    The token is resolved by the caller on a hook's own thread (the
+    profile's secret scope does not travel to daemon threads) and
+    handed in — no secret resolution happens inside this call.
+    """
     if not token:
         if "no-token" not in _warned:
             _warned.add("no-token")
@@ -183,12 +191,17 @@ def _tg_request(method: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]
         return None
 
 
-def _tg_async(method: str, params: Dict[str, Any],
+def _tg_async(method: str, params: Dict[str, Any], token: str,
               on_result: Optional[Any] = None) -> None:
-    """Fire-and-forget Telegram call in a daemon thread."""
+    """Fire-and-forget Telegram call in a daemon thread.
+
+    Token and chat id are resolved before this is called (on the hook's
+    own thread) and travel with the params/token arguments — a daemon
+    thread does not carry the profile's secret scope.
+    """
     def _worker():
         try:
-            result = _tg_request(method, params)
+            result = _tg_request(method, params, token)
             if on_result and result:
                 try:
                     on_result(result)
@@ -209,6 +222,8 @@ class _TaskStream:
     def __init__(self, task_id: str):
         self.task_id = task_id
         self.profile = _profile()
+        self._token: Optional[str] = None   # resolved lazily, hook thread
+        self._chat: Optional[str] = None    # resolved lazily, hook thread
         meta = _task_meta(task_id)
         self.title = meta["title"]
         self.no_stream = meta["no_stream"]
@@ -224,6 +239,22 @@ class _TaskStream:
         self._lock = threading.Lock()
         self._pending_edit = False
         self._send_in_flight = False
+
+    def _creds(self, resolve: bool = True):
+        """(token, chat_id) pair for Telegram calls.
+
+        Resolution goes through the profile's secret scope, which only
+        exists on hook threads — so resolve-and-cache happens on the
+        calling (hook) thread and the cached pair is what gets handed
+        to _tg_async. Daemon-thread callbacks pass resolve=False and
+        reuse the cache; they never touch the secret scope.
+        """
+        if resolve:
+            if self._token is None:
+                self._token = _bot_token()
+            if self._chat is None:
+                self._chat = _chat_id()
+        return self._token, self._chat
 
     def add_completion_tokens(self, n: int):
         """Accumulate output tokens from a post_api_request hook."""
@@ -276,7 +307,7 @@ class _TaskStream:
 
     def _do_send_initial(self, final: bool = False, blocked: bool = False,
                          summary: str = ""):
-        chat = _chat_id()
+        token, chat = self._creds()
         if not chat:
             return
         with self._lock:
@@ -294,12 +325,12 @@ class _TaskStream:
             except Exception:
                 with self._lock:
                     self._send_in_flight = False
-        _tg_async("sendMessage", {"chat_id": chat, "text": text},
+        _tg_async("sendMessage", {"chat_id": chat, "text": text}, token,
                   on_result=_on_result)
 
     def _do_edit(self, final: bool = False, blocked: bool = False,
                  summary: str = ""):
-        chat = _chat_id()
+        token, chat = self._creds()
         if not chat:
             return
         with self._lock:
@@ -325,21 +356,25 @@ class _TaskStream:
                 self.edit_count += 1
             _tg_async("editMessageText",
                       {"chat_id": chat, "message_id": mid, "text": text},
-                      on_result=_on_result)
+                      token, on_result=_on_result)
         else:
             self._do_send_initial(final=final, blocked=blocked,
                                   summary=summary)
 
     def _do_pin(self):
-        """Pin the final message. Fail-open; bots can pin their own 1:1 messages."""
-        chat = _chat_id()
+        """Pin the final message. Fail-open; bots can pin their own 1:1 messages.
+
+        Runs on a delayed daemon thread: uses the cached credentials
+        only (resolve=False) — the secret scope is never touched here.
+        """
+        token, chat = self._creds(resolve=False)
         with self._lock:
             mid = self.message_id
-        if not chat or not mid:
+        if not chat or not mid or not token:
             return
         _tg_async("pinChatMessage",
                   {"chat_id": chat, "message_id": mid,
-                   "disable_notification": True})
+                   "disable_notification": True}, token)
 
     def schedule_edit(self, force: bool = False):
         """Throttled edit: max 1 per _EDIT_THROTTLE_SECONDS."""
@@ -492,20 +527,25 @@ def on_post_tool_call(tool_name: str, result: Any = None,
 
 
 
-# --- Phase 2: plugin-side steering via comment polling ---
+# --- Phase 2: steer watch (display only — core delivers steers) ---
 _steer_watermark: Dict[str, int] = {}    # {task_id: last_seen_comment_id}
 _steer_last_poll: Dict[str, float] = {}  # {task_id: monotonic time}
 _STEER_POLL_SECONDS = 6.0
 
 
-def _poll_steer_comments(task_id):
-    """Return list of new [steer] comment bodies since watermark, or None.
-    Seeds watermark on first call (returns None)."""
+def _watch_steer_comments(task_id) -> int:
+    """Count new [steer] comments since the watermark (0 when none).
+
+    Display-only: Hermes core already delivers every new non-self task
+    comment to the running worker, so the plugin never injects steer
+    text into the LLM turn (that double-delivered every steer). This
+    watch exists solely to mirror a "Steer received" line into the
+    stream. Seeds the watermark on first call (returns 0)."""
     import sqlite3 as _sql
     now = time.monotonic()
     last = _steer_last_poll.get(task_id, 0)
     if (now - last) < _STEER_POLL_SECONDS:
-        return None
+        return 0
     _steer_last_poll[task_id] = now
     seen = _steer_watermark.get(task_id)
     try:
@@ -517,14 +557,14 @@ def _poll_steer_comments(task_id):
                     "SELECT COALESCE(MAX(id), 0) FROM task_comments WHERE task_id = ?",
                     (task_id,)).fetchone()
                 _steer_watermark[task_id] = row[0]
-                return None
+                return 0
             rows = conn.execute(
                 "SELECT id, author, body FROM task_comments "
                 "WHERE task_id = ? AND id > ? ORDER BY id ASC",
                 (task_id, seen)).fetchall()
             if rows:
                 _steer_watermark[task_id] = max(r[0] for r in rows)
-            steers = []
+            count = 0
             own = (os.environ.get("HERMES_PROFILE") or "").strip()
             for cid, author, body in rows:
                 body = (body or "").strip()
@@ -532,13 +572,13 @@ def _poll_steer_comments(task_id):
                     continue
                 if (author or "").strip() == own:
                     continue
-                steers.append(body[len("[steer]"):].strip())
-            return steers or None
+                count += 1
+            return count
         finally:
             conn.close()
     except Exception as e:
-        log.warning("kanban-stream steer poll failed: %s", e)
-        return None
+        log.warning("kanban-stream steer watch failed: %s", e)
+        return 0
 
 
 def on_pre_llm_call(*args: Any, **kwargs: Any) -> Any:
@@ -548,23 +588,18 @@ def on_pre_llm_call(*args: Any, **kwargs: Any) -> Any:
         s = _stream()
         if s is None:
             return None
-        # Phase 2: poll for steering comments (input works even with no_stream)
-        steers = _poll_steer_comments(_task_id())
-        steer_ctx = None
-        if steers:
-            joined = "\n".join("- " + x for x in steers)
-            steer_ctx = ("New steering instruction(s) from the operator "
-                         "(delivered mid-task \u2014 adjust your approach):\n" + joined)
-            if not s.no_stream:
-                s.push_error("\u2709\ufe0f Steer received")
+        # Steering delivery belongs to core — Hermes hands every new
+        # non-self task comment to the running worker itself. The plugin
+        # never injects steer text here (each steer used to arrive
+        # twice); the watch only mirrors the stream line.
+        if _watch_steer_comments(_task_id()) and not s.no_stream:
+            s.push_error("\u2709\ufe0f Steer received")
         if s.no_stream:
-            return {"context": steer_ctx} if steer_ctx else None
+            return None
         with _streams_lock:
             has_message = s.message_id is not None or len(s.tool_history) > 0
         if has_message:
             s.push_think()
-        if steer_ctx:
-            return {"context": steer_ctx}
         return None
     except Exception as e:
         log.warning("kanban-stream on_pre_llm_call failed: %s", e)
@@ -627,6 +662,8 @@ def on_task_done(task_id: Optional[str] = None,
 
 
 def register(ctx: Any) -> None:
+    global _profile_name
+    _profile_name = getattr(ctx, "profile_name", None) or "hermes"
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("post_tool_call", on_post_tool_call)
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
