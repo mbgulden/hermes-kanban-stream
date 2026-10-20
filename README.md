@@ -105,10 +105,15 @@ current `main`.
 # from the standalone repo (recommended)
 hermes plugins install https://github.com/mbgulden/hermes-kanban-stream
 
-# or a local checkout
-hermes plugins install /path/to/hermes-kanban-stream
-
 # the plugin ships disabled by default (network-calling) — enable it
+hermes plugins enable kanban-stream
+```
+
+From a local checkout, copy the package into your plugins dir instead
+(the installer treats its argument as a repo reference):
+
+```bash
+cp -r kanban-stream ~/.hermes/plugins/
 hermes plugins enable kanban-stream
 ```
 
