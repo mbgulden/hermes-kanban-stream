@@ -166,8 +166,11 @@ KANBAN_STREAM_OPS_CHAT_ID=          # leave empty for 1:1 with you
 - A full commented template lives in `.env.example`.
 
 Hermes resolves these via `agent.secret_scope.get_secret()` — the
-correct route under profile multiplexing. Set them, then restart the
-gateway/worker so the env is picked up.
+correct route under profile multiplexing. (When the secret-scope
+machinery is unavailable — older Hermes or non-gateway runs — the
+plugin falls back to reading the same names from the process
+environment.) Set them, then restart the gateway/worker so the env
+is picked up.
 
 ### 3. Enable the plugin and watch a task (2 min)
 
