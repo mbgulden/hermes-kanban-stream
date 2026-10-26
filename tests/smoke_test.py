@@ -94,6 +94,20 @@ check("_format: renders task id and stays under Telegram limit",
 final = stream._format(final=True, summary="done")
 check("_format: final frame shows total", "total" in final)
 
+# 6b. Metric display (v1.0.3): total output tokens, never a tok/s rate —
+# the old figure divided cumulative tokens by wall-clock elapsed and read
+# as a generation rate. Zero tokens renders no suffix at all.
+check("_format: zero tokens renders no token suffix",
+      "out tok" not in text and "tok/s" not in text)
+tok_stream = mod._TaskStream("t_smoketest")
+tok_stream.add_completion_tokens(9412)
+tok_text = tok_stream._format()
+check("_format: tokens render as thousands-separated total",
+      "9,412 out tok" in tok_text and "tok/s" not in tok_text)
+tok_final = tok_stream._format(final=True, summary="done")
+check("_format: final frame carries the out-tok total",
+      "9,412 out tok" in tok_final and "tok/s" not in tok_final)
+
 # 7. steer.py --check exits 1 (not a crash) with no env configured.
 env = {k: v for k, v in os.environ.items()
        if not k.startswith("KANBAN_STREAM_")}
