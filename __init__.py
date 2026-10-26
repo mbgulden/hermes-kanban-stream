@@ -1,4 +1,4 @@
-"""Kanban Stream Plugin for Hermes Agent — v1.0.2 (public release).
+"""Kanban Stream Plugin for Hermes Agent — v1.0.3 (public release).
 
 Streams kanban worker activity (tool calls, thinking phases) to a
 Telegram ops channel. One message per task, edited in place. Final
@@ -6,7 +6,7 @@ messages are pinned.
 
 Phase 1a: skeleton + hooks (done). Phase 1b: Telegram forwarding (done).
 Phase 1c: formatting hardening — rolling window, elapsed timer,
-edit counting, final-state pin, tokens/sec from post_api_request usage.
+edit counting, final-state pin, total output tokens from post_api_request usage.
 Phase 2: steering via kanban task comments (write-side: the optional
 bin/steer.py companion daemon posts /steer commands as [steer] comments
 from Telegram through the public `hermes kanban comment` CLI; delivery
@@ -263,13 +263,19 @@ class _TaskStream:
         with self._lock:
             self.completion_tokens += n
 
-    def _tok_per_sec(self) -> str:
-        elapsed_s = time.time() - self.start_time
+    def _token_suffix(self) -> str:
+        """State-line suffix: total output tokens, or "" when none yet.
+
+        (Replaces the old tok/s figure — cumulative tokens ÷ wall-clock
+        elapsed, which read as a generation rate but mostly measured
+        waiting. A true rate is not computable from per-request token
+        counts alone, so the display shows the total instead.)
+        """
         with self._lock:
             toks = self.completion_tokens
-        if elapsed_s < 1 or toks <= 0:
+        if toks <= 0:
             return ""
-        return f"{toks / elapsed_s:.0f} tok/s"
+        return f" · {toks:,} out tok"
 
     def _format(self, final: bool = False, blocked: bool = False,
                 summary: str = "") -> str:
@@ -278,15 +284,14 @@ class _TaskStream:
             elapsed = f"{elapsed_s}s"
         else:
             elapsed = f"{elapsed_s // 60}m {elapsed_s % 60}s"
-        tps = self._tok_per_sec()
-        tps_suffix = f" · {tps}" if tps else ""
+        tok_suffix = self._token_suffix()
 
         if final:
             icon = "🚫" if blocked else "✅"
-            state_line = f"⏱️ {elapsed} total{tps_suffix}"
+            state_line = f"⏱️ {elapsed} total{tok_suffix}"
         else:
             icon = "🔧"
-            state_line = f"⏱️ {elapsed} elapsed{tps_suffix}"
+            state_line = f"⏱️ {elapsed} elapsed{tok_suffix}"
 
         lines = [
             f"{icon} @{self.profile} — {self.task_id}",
@@ -434,9 +439,12 @@ class _TaskStream:
         def _delayed_pin():
             time.sleep(5)
             self._do_pin()
+            with self._lock:
+                toks = self.completion_tokens
             log.warning("kanban-stream: task %s finished, %d edits total, %s",
                         self.task_id, self.edit_count,
-                        self._tok_per_sec() or "no tok/s")
+                        f"{toks:,} out tok" if toks > 0
+                        else "no output tokens")
         threading.Thread(target=_delayed_pin, daemon=True).start()
 
 
@@ -609,7 +617,7 @@ def on_pre_llm_call(*args: Any, **kwargs: Any) -> Any:
 def on_post_api_request(task_id: Optional[str] = None,
                        usage: Optional[Dict[str, Any]] = None,
                        **kwargs: Any) -> None:
-    """Accumulate per-request output tokens for tok/s display. Fail-open.
+    """Accumulate per-request output tokens for the total-token display. Fail-open.
 
     NOTE: the hook's task_id kwarg is the SESSION id, not the kanban task
     id — always key the stream by the HERMES_KANBAN_TASK env var.
