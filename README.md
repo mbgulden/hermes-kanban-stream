@@ -1,5 +1,7 @@
 # kanban-stream
 
+[![tests](https://github.com/mbgulden/hermes-kanban-stream/actions/workflows/tests.yml/badge.svg)](https://github.com/mbgulden/hermes-kanban-stream/actions/workflows/tests.yml)
+
 Live-stream your Hermes kanban workers to Telegram. One message per task,
 **edited in place** as the worker goes — rolling tool-call history, elapsed
 timer, total output tokens, a thinking indicator, and a pinned final state
@@ -292,6 +294,17 @@ fail-opens and the next edit retries.
 - **The companion daemon** long-polls `getUpdates` with the same token
   (25 s timeout) and stores one integer (the update offset) at
   `$HERMES_HOME/plugin-data/kanban-stream/steer-offset`.
+
+## Support & expectations
+
+This plugin is maintained by one person, in the open, alongside the
+fleet it was built for. Issues are triaged in batches rather than
+daily; a good bug report (use the issue templates — the relevant log
+lines, and `bin/steer.py --check` output if steering is involved) gets
+a faster answer than a vague one. There is no SLA and no paid support
+tier. Fixes ship as tagged releases, and the smoke suite in `tests/`
+runs in CI on every push, so the badge at the top of this README is
+the current truth about the code.
 
 ## License
 
