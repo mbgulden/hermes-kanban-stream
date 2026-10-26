@@ -2,14 +2,14 @@
 
 Live-stream your Hermes kanban workers to Telegram. One message per task,
 **edited in place** as the worker goes — rolling tool-call history, elapsed
-timer, tokens/sec, a thinking indicator, and a pinned final state
+timer, total output tokens, a thinking indicator, and a pinned final state
 (✅ done / 🚫 blocked). Mid-task, you can **steer** a running worker from
 Telegram without interrupting it.
 
 ```
 🔧 @ned — t_77a5d343
 📋 Prepare kanban-stream plugin for public release (repo + marketplace)
-⏱️ 12m 04s elapsed · 41 tok/s
+⏱️ 12m 04s elapsed · 9,412 out tok
 ---
 🔍 terminal command='bash /tmp/catalog_probe.sh'
 🔍 read_file path='/tmp/hupstream/plugin-catalog/README.md'
@@ -20,7 +20,7 @@ Telegram without interrupting it.
 ```
 ✅ @ned — t_77a5d343
 📋 Prepare kanban-stream plugin for public release (repo + marketplace)
-⏱️ 31m 20s total · 38 tok/s
+⏱️ 31m 20s total · 24,860 out tok
 ---
 Done. Release package prepared; handed to muse for review.
 ```
@@ -37,7 +37,7 @@ The message stays pinned so the final state survives the scroll.
 - Edits one Telegram message per task (throttled to ≤1 edit / 5 s,
   thinking indicator ≤1 / 30 s) instead of flooding the chat.
 - Shows per-request completion tokens from `post_api_request` usage as
-  tok/s over the task's lifetime.
+  a running total of output tokens over the task's lifetime.
 - **Steering (Phase 2):** a `[steer] …` comment on the task is
   delivered to the running worker by Hermes core itself (core hands
   every new non-self task comment to the worker), and the plugin
