@@ -1,9 +1,9 @@
 name: kanban-stream
-version: "1.0.2"
+version: "1.0.3"
 description: >-
   Stream live kanban worker activity to a Telegram ops channel — one
   edit-in-place message per task with rolling tool history, elapsed timer,
-  tokens/sec, final-state pin, and mid-task /steer steering via task
+  total output tokens, final-state pin, and mid-task /steer steering via task
   comments.
 author: "Michael Gulden"
 license: MIT
